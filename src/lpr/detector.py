@@ -100,18 +100,99 @@ class PlateDetector:
 
     def _extract_plate_region(
         self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int
-    ) -> np.ndarray:
-        """Extract the likely plate region from a vehicle bounding box.
+    ) -> np.ndarray | None:
+        """Extract the license plate rectangle from a vehicle bounding box.
 
-        License plates are typically in the lower third of a vehicle.
+        Uses contour detection to find bright rectangular regions that
+        match plate aspect ratios (typically 2:1 to 5:1 width:height).
+        Falls back to the lower-center crop if no contour is found.
         """
-        vehicle_h = y2 - y1
-        vehicle_w = x2 - x1
+        import cv2
 
-        # Focus on lower 40% of vehicle, middle 80% width
-        plate_y1 = y1 + int(vehicle_h * 0.6)
-        plate_y2 = y2
-        plate_x1 = x1 + int(vehicle_w * 0.1)
-        plate_x2 = x2 - int(vehicle_w * 0.1)
+        vehicle_crop = frame[y1:y2, x1:x2]
+        vh, vw = vehicle_crop.shape[:2]
+        if vh < 10 or vw < 10:
+            return None
 
-        return frame[plate_y1:plate_y2, plate_x1:plate_x2]
+        gray = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2GRAY)
+
+        # Look for plate-like rectangles via edges + contours
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 200)
+
+        # Dilate to close gaps in plate border
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
+        )
+
+        candidates = []
+        min_plate_area = vh * vw * 0.005  # plate is at least 0.5% of vehicle
+        max_plate_area = vh * vw * 0.25   # and at most 25%
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < min_plate_area or area > max_plate_area:
+                continue
+
+            # Approximate contour to polygon
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
+
+            # Plates are roughly rectangular (4 vertices)
+            if len(approx) < 4 or len(approx) > 6:
+                continue
+
+            rx, ry, rw, rh = cv2.boundingRect(approx)
+            if rh == 0:
+                continue
+
+            aspect = rw / rh
+            # US plates are roughly 12"x6" = 2:1, but with perspective
+            # distortion allow a wider range
+            if not (1.5 <= aspect <= 6.0):
+                continue
+
+            # Prefer candidates in the lower half of the vehicle
+            center_y = ry + rh / 2
+            vertical_score = center_y / vh  # higher = lower in image = better
+
+            # Check that the region has decent contrast (plate chars on plate bg)
+            roi = gray[ry:ry + rh, rx:rx + rw]
+            if roi.size == 0:
+                continue
+            std_dev = float(np.std(roi))
+            if std_dev < 20:
+                continue
+
+            candidates.append((rx, ry, rw, rh, vertical_score, std_dev))
+
+        if candidates:
+            # Pick the best: prefer lower position + higher contrast
+            candidates.sort(key=lambda c: (c[4] * 0.4 + c[5] / 100 * 0.6), reverse=True)
+            rx, ry, rw, rh = candidates[0][:4]
+
+            # Add a small margin
+            margin_x = int(rw * 0.05)
+            margin_y = int(rh * 0.1)
+            rx = max(0, rx - margin_x)
+            ry = max(0, ry - margin_y)
+            rw = min(vw - rx, rw + 2 * margin_x)
+            rh = min(vh - ry, rh + 2 * margin_y)
+
+            plate_img = vehicle_crop[ry:ry + rh, rx:rx + rw]
+            if plate_img.size > 0:
+                logger.debug(
+                    "Found plate contour at (%d,%d %dx%d) aspect=%.1f",
+                    rx, ry, rw, rh, rw / max(rh, 1),
+                )
+                return plate_img
+
+        # Fallback: lower-center crop of vehicle
+        plate_y1 = int(vh * 0.6)
+        plate_y2 = vh
+        plate_x1 = int(vw * 0.1)
+        plate_x2 = int(vw * 0.9)
+        return vehicle_crop[plate_y1:plate_y2, plate_x1:plate_x2]
