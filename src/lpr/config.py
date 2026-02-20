@@ -25,18 +25,22 @@ class Config:
     dedup_seconds: float = 5.0
 
     def resolve_device(self) -> str:
-        """Resolve 'auto' device to cuda or cpu."""
-        if self.device == "auto":
+        """Resolve device string, falling back to cpu when CUDA unavailable."""
+        requested = self.device
+        log = logging.getLogger("lpr")
+
+        if requested in ("auto", "cuda"):
             if torch.cuda.is_available():
-                resolved = "cuda"
-                logging.getLogger("lpr").info(
+                log.info(
                     "CUDA available - using GPU: %s",
                     torch.cuda.get_device_name(0),
                 )
-            else:
-                resolved = "cpu"
-                logging.getLogger("lpr").info(
-                    "CUDA not available - using CPU inference"
+                return "0"
+            if requested == "cuda":
+                log.warning(
+                    "CUDA requested but not available - falling back to CPU"
                 )
-            return resolved
-        return self.device
+            else:
+                log.info("CUDA not available - using CPU inference")
+            return "cpu"
+        return requested
