@@ -76,9 +76,12 @@ class PlateReader:
             try:
                 from fast_plate_ocr import LicensePlateRecognizer
 
+                from . import _ort_providers
+
                 self._reader = LicensePlateRecognizer(
                     hub_ocr_model="global-plates-mobile-vit-v2-model",
                     device="cuda" if self.device != "cpu" else "cpu",
+                    providers=_ort_providers(self.device),
                 )
                 logger.info("Loaded fast-plate-ocr model (device=%s)", self.device)
             except ImportError:

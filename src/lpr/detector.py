@@ -45,9 +45,12 @@ class PlateDetector:
         try:
             from open_image_models import LicensePlateDetector
 
+            from . import _ort_providers
+
             self._model = LicensePlateDetector(
                 detection_model=self.detection_model,
                 conf_thresh=self.confidence,
+                providers=_ort_providers(self.device),
             )
             logger.info(
                 "Loaded open-image-models detector (model=%s, conf=%.2f)",

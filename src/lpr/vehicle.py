@@ -66,11 +66,11 @@ class VehicleClassifier:
         """Create ONNX Runtime sessions for vehicle attribute models."""
         import onnxruntime as ort
 
+        from . import _ort_providers
+
         model_path = self._download_model()
 
-        providers = ["CPUExecutionProvider"]
-        if self._device != "cpu":
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = _ort_providers(self._device)
 
         self._session = ort.InferenceSession(str(model_path), providers=providers)
         active = self._session.get_providers()
