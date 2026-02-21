@@ -108,12 +108,54 @@ def parse_args(argv: list[str] | None = None) -> Config:
         help="Detection model name (default: yolo-v9-t-384-license-plate-end2end)",
     )
     parser.add_argument(
+        "--tls-verify",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Verify TLS certificates for RTSPS streams (default: disabled "
+        "for self-signed certs like Ubiquiti)",
+    )
+    parser.add_argument(
+        "--tls-ca-file",
+        default=None,
+        metavar="PATH",
+        help="CA certificate file (PEM) to verify RTSPS server certificate",
+    )
+    parser.add_argument(
         "--legacy-detector",
         action="store_true",
         help="Use legacy YOLO+contour detection instead of dedicated plate detector",
     )
+    parser.add_argument(
+        "--vehicle-attrs",
+        action="store_true",
+        help="Enable vehicle attribute detection (color, type)",
+    )
+    parser.add_argument(
+        "--vehicle-make-model",
+        default=None,
+        metavar="PATH",
+        help="Path to ONNX model for vehicle make/model classification",
+    )
+    parser.add_argument(
+        "--vehicle-make-model-labels",
+        default=None,
+        metavar="PATH",
+        help="Path to labels file (one per line) for make/model model",
+    )
 
     args = parser.parse_args(argv)
+
+    # Validate make/model arguments
+    mm = args.vehicle_make_model
+    mm_labels = args.vehicle_make_model_labels
+    if (mm is None) != (mm_labels is None):
+        parser.error(
+            "--vehicle-make-model and --vehicle-make-model-labels "
+            "must be provided together"
+        )
+    # Implicitly enable vehicle attrs when make/model is provided
+    if mm is not None:
+        args.vehicle_attrs = True
 
     return Config(
         source=args.source,
@@ -126,11 +168,22 @@ def parse_args(argv: list[str] | None = None) -> Config:
         log_level=args.log_level,
         log_file=Path(args.log_file) if args.log_file else None,
         dedup_seconds=args.dedup_seconds,
+        tls_verify=args.tls_verify,
+        tls_ca_file=Path(args.tls_ca_file) if args.tls_ca_file else None,
         min_readings=args.min_readings,
         consensus_threshold=args.consensus_threshold,
         ocr_engine=args.ocr_engine,
         detection_model=args.detection_model,
         use_legacy_detector=args.legacy_detector,
+        vehicle_attrs=args.vehicle_attrs,
+        vehicle_make_model_path=(
+            Path(args.vehicle_make_model)
+            if args.vehicle_make_model else None
+        ),
+        vehicle_make_model_labels=(
+            Path(args.vehicle_make_model_labels)
+            if args.vehicle_make_model_labels else None
+        ),
     )
 
 

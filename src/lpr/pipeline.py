@@ -10,6 +10,7 @@ from .detector import PlateDetector
 from .output import JSONOutputWriter
 from .reader import PlateReader
 from .stream import StreamReader
+from .vehicle import VehicleClassifier
 
 logger = logging.getLogger("lpr.pipeline")
 
@@ -25,6 +26,13 @@ class Pipeline:
             consensus_threshold=config.consensus_threshold,
             track_timeout=config.track_timeout,
         )
+        self._vehicle_classifier: VehicleClassifier | None = None
+        if config.vehicle_attrs:
+            self._vehicle_classifier = VehicleClassifier(
+                device=self._device,
+                make_model_path=config.vehicle_make_model_path,
+                make_model_labels_path=config.vehicle_make_model_labels,
+            )
         self._stats = {
             "frames": 0,
             "detections": 0,
@@ -41,6 +49,10 @@ class Pipeline:
             frame_skip=self.config.frame_skip,
             reconnect_delay=self.config.reconnect_delay,
             max_reconnects=self.config.max_reconnects,
+            tls_verify=self.config.tls_verify,
+            tls_ca_file=(
+                str(self.config.tls_ca_file) if self.config.tls_ca_file else None
+            ),
         )
 
         detector = PlateDetector(
@@ -56,6 +68,9 @@ class Pipeline:
             ocr_engine=self.config.ocr_engine,
         )
         reader.load_model()
+
+        if self._vehicle_classifier is not None:
+            self._vehicle_classifier.load_model()
 
         writer = JSONOutputWriter(Path(self.config.output_path))
 
@@ -106,6 +121,25 @@ class Pipeline:
 
             self._stats["plates_read"] += 1
 
+            # Vehicle attribute detection
+            v_color = None
+            v_type = None
+            v_mm = None
+            v_color_conf = 0.0
+            v_type_conf = 0.0
+            v_mm_conf = 0.0
+            if self._vehicle_classifier is not None:
+                attrs = self._vehicle_classifier.classify(
+                    frame.image, detection.bbox
+                )
+                if attrs is not None:
+                    v_color = attrs.color
+                    v_type = attrs.vehicle_type
+                    v_mm = attrs.make_model
+                    v_color_conf = attrs.color_confidence
+                    v_type_conf = attrs.type_confidence
+                    v_mm_conf = attrs.make_model_confidence
+
             reading = PlateReading(
                 text=plate.text,
                 confidence=plate.confidence,
@@ -113,6 +147,12 @@ class Pipeline:
                 frame_number=frame.frame_number,
                 timestamp=frame.timestamp,
                 source=frame.source,
+                vehicle_color=v_color,
+                vehicle_type=v_type,
+                vehicle_make_model=v_mm,
+                vehicle_color_confidence=v_color_conf,
+                vehicle_type_confidence=v_type_conf,
+                vehicle_make_model_confidence=v_mm_conf,
             )
 
             result = self._consensus.add_reading(reading)
@@ -130,15 +170,29 @@ class Pipeline:
                 source=result.source,
                 consensus_count=result.reading_count,
                 consensus_confidence=result.consensus_confidence,
+                vehicle_color=result.vehicle_color,
+                vehicle_type=result.vehicle_type,
+                vehicle_make_model=result.vehicle_make_model,
             )
             writer.write(record)
 
+            vehicle_info = ""
+            if result.vehicle_color or result.vehicle_type:
+                parts = [
+                    result.vehicle_color or "",
+                    result.vehicle_type or "",
+                ]
+                vehicle_info = " vehicle: " + " ".join(p for p in parts if p)
+                if result.vehicle_make_model:
+                    vehicle_info += f" ({result.vehicle_make_model})"
+
             logger.info(
                 "Plate consensus: %s (confidence: %.2f, readings: %d, "
-                "consensus: %.2f) at frame %d",
+                "consensus: %.2f) at frame %d%s",
                 result.text,
                 plate.confidence,
                 result.reading_count,
                 result.consensus_confidence,
                 result.frame_number,
+                vehicle_info,
             )

@@ -23,6 +23,9 @@ class DetectionRecord:
     detected_at: str
     consensus_count: int = 0
     consensus_confidence: float = 0.0
+    vehicle_color: str | None = None
+    vehicle_type: str | None = None
+    vehicle_make_model: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -83,6 +86,9 @@ class JSONOutputWriter:
         source: str,
         consensus_count: int = 0,
         consensus_confidence: float = 0.0,
+        vehicle_color: str | None = None,
+        vehicle_type: str | None = None,
+        vehicle_make_model: str | None = None,
     ) -> DetectionRecord:
         return DetectionRecord(
             plate_text=plate_text,
@@ -94,4 +100,7 @@ class JSONOutputWriter:
             detected_at=datetime.now(timezone.utc).isoformat(),
             consensus_count=consensus_count,
             consensus_confidence=consensus_confidence,
+            vehicle_color=vehicle_color,
+            vehicle_type=vehicle_type,
+            vehicle_make_model=vehicle_make_model,
         )

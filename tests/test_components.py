@@ -224,6 +224,86 @@ def test_consensus_no_double_emit():
         assert result is None  # should not emit again
 
 
+def test_vehicle_roi_estimation():
+    """Test that estimated vehicle ROI is larger than plate and clamped to frame."""
+    from lpr.vehicle import VehicleClassifier
+
+    plate_bbox = (270, 350, 370, 380)
+    frame_shape = (480, 640, 3)
+
+    roi = VehicleClassifier.estimate_vehicle_roi(plate_bbox, frame_shape)
+    rx1, ry1, rx2, ry2 = roi
+
+    # ROI must be larger than the plate
+    assert rx2 - rx1 > plate_bbox[2] - plate_bbox[0]
+    assert ry2 - ry1 > plate_bbox[3] - plate_bbox[1]
+
+    # ROI must be clamped to frame bounds
+    assert rx1 >= 0
+    assert ry1 >= 0
+    assert rx2 <= 640
+    assert ry2 <= 480
+
+    # Plate near top edge — ROI should clamp vy1 to 0
+    top_plate = (300, 10, 400, 30)
+    roi_top = VehicleClassifier.estimate_vehicle_roi(top_plate, frame_shape)
+    assert roi_top[1] == 0
+
+
+def test_vehicle_attributes_dataclass():
+    """Test VehicleAttributes defaults."""
+    from lpr.vehicle import VehicleAttributes
+
+    attrs = VehicleAttributes(
+        color="white", color_confidence=0.95,
+        vehicle_type="car", type_confidence=0.88,
+    )
+    assert attrs.make_model is None
+    assert attrs.make_model_confidence == 0.0
+    assert attrs.color == "white"
+    assert attrs.vehicle_type == "car"
+
+
+def test_consensus_with_vehicle_attrs():
+    """Test that consensus majority-votes vehicle attributes."""
+    from lpr.consensus import PlateConsensus, PlateReading
+
+    consensus = PlateConsensus(min_readings=3)
+    bbox = (100, 200, 300, 250)
+
+    colors = ["white", "white", "gray"]
+    types = ["car", "car", "truck"]
+
+    for i in range(3):
+        reading = PlateReading(
+            text="ABC1234", confidence=0.9, bbox=bbox,
+            frame_number=i + 1, timestamp=float(i), source="test.mp4",
+            vehicle_color=colors[i], vehicle_type=types[i],
+            vehicle_color_confidence=0.9, vehicle_type_confidence=0.9,
+        )
+        result = consensus.add_reading(reading)
+
+    assert result is not None
+    assert result.vehicle_color == "white"  # 2 votes vs 1
+    assert result.vehicle_type == "car"  # 2 votes vs 1
+
+
+def test_output_record_with_vehicle():
+    """Test that vehicle fields appear in JSON output dict."""
+    from lpr.output import JSONOutputWriter
+
+    record = JSONOutputWriter.make_record(
+        plate_text="XYZ5678", confidence=0.9, timestamp=2.0,
+        frame_number=20, bbox=(50, 100, 200, 150), source="test.mp4",
+        vehicle_color="blue", vehicle_type="truck",
+        vehicle_make_model="Ford F-150",
+    )
+    d = record.to_dict()
+    assert d["vehicle_color"] == "blue"
+    assert d["vehicle_type"] == "truck"
+    assert d["vehicle_make_model"] == "Ford F-150"
+
+
 def test_output_writer_with_consensus():
     """Test JSON output writer with consensus fields."""
     from lpr.output import JSONOutputWriter

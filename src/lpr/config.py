@@ -27,10 +27,19 @@ class Config:
     consensus_threshold: float = 0.6
     track_timeout: float = 5.0
 
+    # TLS settings (for RTSPS streams)
+    tls_verify: bool = False
+    tls_ca_file: Path | None = None
+
     # Engine selection
     ocr_engine: str = "fast-plate-ocr"
     detection_model: str = "yolo-v9-t-384-license-plate-end2end"
     use_legacy_detector: bool = False
+
+    # Vehicle attribute detection
+    vehicle_attrs: bool = False
+    vehicle_make_model_path: Path | None = None
+    vehicle_make_model_labels: Path | None = None
 
     def resolve_device(self) -> str:
         """Resolve device string, falling back to cpu when CUDA unavailable."""

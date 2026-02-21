@@ -28,22 +28,30 @@ class Frame:
     source: str
 
 
-def _probe_video(source: str) -> dict | None:
+def _probe_video(
+    source: str,
+    tls_verify: bool = False,
+    tls_ca_file: str | None = None,
+) -> dict | None:
     """Use ffprobe to get video stream metadata."""
     ffprobe = shutil.which("ffprobe")
     if ffprobe is None:
         return None
 
     try:
+        cmd = [ffprobe, "-v", "quiet"]
+        if source.startswith("rtsps://"):
+            cmd += ["-tls_verify", "1" if tls_verify else "0"]
+            if tls_ca_file:
+                cmd += ["-ca_file", tls_ca_file]
+        cmd += [
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "v:0",
+            source,
+        ]
         result = subprocess.run(
-            [
-                ffprobe,
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_streams",
-                "-select_streams", "v:0",
-                source,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -101,12 +109,20 @@ class StreamReader:
         frame_skip: int = 5,
         reconnect_delay: float = 5.0,
         max_reconnects: int = 10,
+        tls_verify: bool = False,
+        tls_ca_file: str | None = None,
     ):
         self.source = source
         self.frame_skip = max(1, frame_skip)
         self.reconnect_delay = reconnect_delay
         self.max_reconnects = max_reconnects
-        self._is_stream = source.startswith("rtsp://") or source.startswith("http")
+        self._tls_verify = tls_verify
+        self._tls_ca_file = tls_ca_file
+        self._is_stream = (
+            source.startswith("rtsp://")
+            or source.startswith("rtsps://")
+            or source.startswith("http")
+        )
         self._cap: cv2.VideoCapture | None = None
         self._proc: subprocess.Popen | None = None
         self._frame_size: int = 0
@@ -127,13 +143,17 @@ class StreamReader:
         except ImportError:
             return False
 
-        # RTSP stream options
+        # RTSP/RTSPS stream options
         if self._is_stream:
             options = {
                 "rtsp_transport": "tcp",
                 "stimeout": "5000000",
                 "analyzeduration": "1000000",
             }
+            if self.source.startswith("rtsps://"):
+                options["tls_verify"] = "1" if self._tls_verify else "0"
+                if self._tls_ca_file:
+                    options["ca_file"] = self._tls_ca_file
         else:
             options = {}
 
@@ -198,6 +218,13 @@ class StreamReader:
         """
         strategies = []
 
+        # TLS options for RTSPS sources
+        tls_args: list[str] = []
+        if self.source.startswith("rtsps://"):
+            tls_args += ["-tls_verify", "1" if self._tls_verify else "0"]
+            if self._tls_ca_file:
+                tls_args += ["-ca_file", self._tls_ca_file]
+
         # Compute downscaled dimensions (even values required for NV12)
         need_scale = src_h > _MAX_OUTPUT_HEIGHT
         if need_scale:
@@ -219,6 +246,7 @@ class StreamReader:
                 vf = f"scale_cuda=w={out_w}:h={out_h},hwdownload,format=nv12,{select_filter}"
                 cmd = [
                     ffmpeg,
+                ] + tls_args + [
                     "-hwaccel", "cuda",
                     "-hwaccel_output_format", "cuda",
                     "-i", self.source,
@@ -231,6 +259,7 @@ class StreamReader:
             # Strategy 2: CUDA decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
+            ] + tls_args + [
                 "-hwaccel", "cuda",
                 "-i", self.source,
                 "-vf", select_filter,
@@ -243,6 +272,7 @@ class StreamReader:
             # Strategy 3: VAAPI decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
+            ] + tls_args + [
                 "-hwaccel", "vaapi",
                 "-i", self.source,
                 "-vf", select_filter,
@@ -287,7 +317,7 @@ class StreamReader:
         if ffmpeg is None:
             return False
 
-        info = _probe_video(self.source)
+        info = _probe_video(self.source, self._tls_verify, self._tls_ca_file)
         if info is None or info["width"] == 0:
             return False
 

@@ -15,6 +15,12 @@ class PlateReading:
     frame_number: int
     timestamp: float
     source: str
+    vehicle_color: str | None = None
+    vehicle_type: str | None = None
+    vehicle_make_model: str | None = None
+    vehicle_color_confidence: float = 0.0
+    vehicle_type_confidence: float = 0.0
+    vehicle_make_model_confidence: float = 0.0
 
 
 @dataclass
@@ -27,6 +33,9 @@ class ConsensusResult:
     bbox: tuple[int, int, int, int]
     source: str
     frame_number: int
+    vehicle_color: str | None = None
+    vehicle_type: str | None = None
+    vehicle_make_model: str | None = None
 
 
 @dataclass
@@ -192,6 +201,30 @@ class PlateConsensus:
         text = "".join(consensus_chars)
         last_reading = readings[-1]
 
+        # Vehicle attribute consensus — confidence-weighted majority vote
+        vehicle_color: str | None = None
+        vehicle_type: str | None = None
+        vehicle_make_model: str | None = None
+
+        color_votes: Counter[str] = Counter()
+        type_votes: Counter[str] = Counter()
+        mm_votes: Counter[str] = Counter()
+
+        for r in readings:
+            if r.vehicle_color is not None:
+                color_votes[r.vehicle_color] += r.vehicle_color_confidence
+            if r.vehicle_type is not None:
+                type_votes[r.vehicle_type] += r.vehicle_type_confidence
+            if r.vehicle_make_model is not None:
+                mm_votes[r.vehicle_make_model] += r.vehicle_make_model_confidence
+
+        if color_votes:
+            vehicle_color = color_votes.most_common(1)[0][0]
+        if type_votes:
+            vehicle_type = type_votes.most_common(1)[0][0]
+        if mm_votes:
+            vehicle_make_model = mm_votes.most_common(1)[0][0]
+
         return ConsensusResult(
             text=text,
             consensus_confidence=consensus_confidence,
@@ -201,6 +234,9 @@ class PlateConsensus:
             bbox=last_reading.bbox,
             source=last_reading.source,
             frame_number=last_reading.frame_number,
+            vehicle_color=vehicle_color,
+            vehicle_type=vehicle_type,
+            vehicle_make_model=vehicle_make_model,
         )
 
     def prune_stale_tracks(self, now: float) -> None:
