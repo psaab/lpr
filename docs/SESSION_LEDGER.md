@@ -1,5 +1,41 @@
 # Session Ledger
 
+## 2026-02-20 -- PyAV Embedded Video Decode
+
+### Session Summary
+
+Replaced the ffmpeg subprocess pipe with PyAV (`av` package) as the primary video
+decode backend. PyAV provides Python bindings to FFmpeg's libav* libraries, giving
+direct numpy array output without pipe I/O or NV12 conversion overhead.
+
+### Decisions Made
+
+| Decision | Rationale |
+|----------|-----------|
+| PyAV as primary decoder | Eliminates subprocess management, pipe I/O, and NV12-to-BGR conversion overhead |
+| Keep ffmpeg subprocess as fallback | PyAV may not be installed in all environments; ffmpeg pipe still works for HW decode |
+| CUDA hwaccel within PyAV | `HWAccel(device_type="cuda")` when `h264_cuvid` in codecs_available |
+| Separate CUDA try/except | Codec may be compiled in but CUDA runtime unavailable — must fall through to software |
+| `frame.to_ndarray(format="bgr24")` | Direct BGR numpy output, no manual pixel format conversion needed |
+| Skip `to_ndarray()` not decode | Can't skip P/B-frame decoding, but skipping the numpy conversion saves most of the cost |
+
+### What Changed
+
+- **pyproject.toml**: Added `av>=13.0` to dependencies
+- **stream.py**: Added `_open_pyav()`, `_frames_pyav()`, `_close_pyav()` methods; updated `_open()` fallback chain (PyAV → ffmpeg → OpenCV); added `_use_pyav`, `_container`, `_av_stream` instance vars
+- **tests/test_components.py**: Added `test_stream_reader_pyav` that verifies PyAV path works when installed
+- **docs/ARCHITECTURE.md**: Updated data flow diagram and added video decode fallback chain section
+
+### Lessons Learned
+
+- `h264_cuvid` in `av.codecs_available` means the codec is compiled into the ffmpeg libraries, NOT that CUDA runtime is available — must try/except the actual open
+- PyAV `av.open()` with `hwaccel=` kwarg raises `av.AVError` (errno 1 "Operation not permitted") when CUDA drivers are insufficient — separate try/except from software decode is essential
+- `stream.average_rate` can be `None` for some containers — guard with `if stream.average_rate else 0.0`
+- `frame.pts * stream.time_base` gives accurate timestamps; fall back to frame_number/fps if PTS unavailable
+- RTSP options (`rtsp_transport`, `stimeout`, `analyzeduration`) passed as `options=` dict to `av.open()`
+
+---
+
 ## 2026-02-20 -- Accuracy Improvements (v0.2.0)
 
 ### Session Summary

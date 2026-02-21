@@ -116,6 +116,78 @@ class StreamReader:
         self._src_height: int = 0
         self._fps: float = 0.0
         self._use_ffmpeg: bool = False
+        self._container = None  # av.InputContainer when using PyAV
+        self._av_stream = None
+        self._use_pyav: bool = False
+
+    def _open_pyav(self) -> bool:
+        """Try to open source with PyAV (embedded ffmpeg decode)."""
+        try:
+            import av
+        except ImportError:
+            return False
+
+        # RTSP stream options
+        if self._is_stream:
+            options = {
+                "rtsp_transport": "tcp",
+                "stimeout": "5000000",
+                "analyzeduration": "1000000",
+            }
+        else:
+            options = {}
+
+        # Try CUDA hwaccel first
+        hwaccel = None
+        try:
+            from av.codec.hwaccel import HWAccel
+            if "h264_cuvid" in av.codecs_available:
+                hwaccel = HWAccel(device_type="cuda")
+        except Exception:
+            hwaccel = None
+
+        container = None
+        desc = "PyAV"
+
+        # Try with CUDA hwaccel
+        if hwaccel is not None:
+            try:
+                container = av.open(self.source, hwaccel=hwaccel, options=options)
+                stream = container.streams.video[0]
+                stream.thread_type = "AUTO"
+                if stream.codec_context.is_hwaccel:
+                    desc = "PyAV + CUDA"
+                else:
+                    # CUDA requested but didn't engage — reopen without it
+                    container.close()
+                    container = None
+            except Exception as e:
+                logger.debug("PyAV CUDA open failed: %s, trying software decode", e)
+                container = None
+
+        # Fall back to software decode via PyAV
+        if container is None:
+            try:
+                container = av.open(self.source, options=options)
+                stream = container.streams.video[0]
+                stream.thread_type = "AUTO"
+                desc = "PyAV (software)" if hwaccel is not None else "PyAV"
+            except Exception as e:
+                logger.debug("PyAV open failed: %s", e)
+                return False
+
+        self._container = container
+        self._av_stream = stream
+        self._out_width = stream.codec_context.width
+        self._out_height = stream.codec_context.height
+        self._fps = float(stream.average_rate) if stream.average_rate else 0.0
+        self._use_pyav = True
+
+        logger.info(
+            "Opened source: %s (%dx%d @ %.1f fps, %s)",
+            self.source, self._out_width, self._out_height, self._fps, desc,
+        )
+        return True
 
     def _build_ffmpeg_strategies(
         self, ffmpeg: str, hwaccels: list[str], src_w: int, src_h: int
@@ -164,7 +236,7 @@ class StreamReader:
                 "-vf", select_filter,
             ] + nv12_out
             strategies.append(
-                (cmd, src_w, src_h, f"HW decode (cuda/nvdec)")
+                (cmd, src_w, src_h, "HW decode (cuda/nvdec)")
             )
 
         if "vaapi" in hwaccels:
@@ -176,7 +248,7 @@ class StreamReader:
                 "-vf", select_filter,
             ] + nv12_out
             strategies.append(
-                (cmd, src_w, src_h, f"HW decode (vaapi)")
+                (cmd, src_w, src_h, "HW decode (vaapi)")
             )
 
         return strategies
@@ -257,6 +329,16 @@ class StreamReader:
 
         return False
 
+    def _close_pyav(self) -> None:
+        """Close PyAV container."""
+        if self._container is not None:
+            try:
+                self._container.close()
+            except Exception:
+                pass
+            self._container = None
+            self._av_stream = None
+
     def _close_ffmpeg(self) -> None:
         """Terminate ffmpeg subprocess."""
         if self._proc is not None:
@@ -294,11 +376,14 @@ class StreamReader:
         return cap
 
     def _open(self) -> cv2.VideoCapture | None:
-        """Open the video source, trying HW decode first."""
+        """Open the video source, trying best decode method first."""
         if not self._is_stream:
             path = Path(self.source)
             if not path.exists():
                 raise FileNotFoundError(f"Video file not found: {self.source}")
+
+        if self._open_pyav():
+            return None  # using PyAV, not cv2
 
         if self._open_ffmpeg():
             return None  # using ffmpeg subprocess, not cv2
@@ -313,10 +398,13 @@ class StreamReader:
         while True:
             try:
                 self._use_ffmpeg = False
+                self._use_pyav = False
                 self._cap = self._open()
                 reconnects = 0
 
-                if self._use_ffmpeg:
+                if self._use_pyav:
+                    yield from self._frames_pyav(frame_number)
+                elif self._use_ffmpeg:
                     yield from self._frames_ffmpeg(frame_number)
                 else:
                     for frame in self._frames_cv2(frame_number):
@@ -343,6 +431,40 @@ class StreamReader:
                 self.reconnect_delay, reconnects, self.max_reconnects,
             )
             time.sleep(self.reconnect_delay)
+
+    def _frames_pyav(self, start_frame: int) -> Generator[Frame, None, None]:
+        """Yield frames from PyAV container (direct BGR numpy output)."""
+        import av
+
+        frame_number = start_frame
+
+        try:
+            for video_frame in self._container.decode(self._av_stream):
+                frame_number += 1
+                if frame_number % self.frame_skip != 0:
+                    continue  # decoded but skip expensive numpy conversion
+
+                image = video_frame.to_ndarray(format="bgr24")
+
+                # Compute timestamp from PTS if available
+                if video_frame.pts is not None and self._av_stream.time_base:
+                    timestamp = float(video_frame.pts * self._av_stream.time_base)
+                elif self._fps > 0:
+                    timestamp = frame_number / self._fps
+                else:
+                    timestamp = 0.0
+
+                yield Frame(
+                    image=image,
+                    frame_number=frame_number,
+                    timestamp=timestamp,
+                    source=self.source,
+                )
+        except av.AVError as e:
+            if self._is_stream:
+                logger.warning("PyAV stream error: %s, will reconnect", e)
+            else:
+                logger.info("End of video file reached")
 
     def _frames_ffmpeg(self, start_frame: int) -> Generator[Frame, None, None]:
         """Yield frames from ffmpeg subprocess (NV12 input, BGR output).
@@ -407,6 +529,7 @@ class StreamReader:
 
     def close(self) -> None:
         """Release resources."""
+        self._close_pyav()
         self._close_ffmpeg()
         if self._cap is not None:
             self._cap.release()

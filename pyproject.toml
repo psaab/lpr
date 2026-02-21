@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
+    "av>=13.0",
     "open-image-models[onnx]",
     "fast-plate-ocr[onnx]",
     "opencv-python-headless>=4.8",

@@ -50,6 +50,37 @@ def test_stream_reader():
         Path(f.name).unlink()
 
 
+def test_stream_reader_pyav():
+    """Test PyAV decode path produces correct frames."""
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        import pytest
+        pytest.skip("PyAV not installed")
+
+    from lpr.stream import StreamReader
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        make_test_video(f.name, frames=20, fps=10)
+
+        reader = StreamReader(f.name, frame_skip=5)
+
+        # Verify PyAV opens successfully
+        assert reader._open_pyav(), "PyAV failed to open test video"
+        assert reader._use_pyav
+        assert reader._container is not None
+        reader.close()
+
+        # Verify full pipeline produces correct frames
+        frames = list(reader.frames())
+        assert len(frames) == 4
+        assert frames[0].frame_number == 5
+        assert frames[0].image.shape == (480, 640, 3)
+        assert frames[0].timestamp >= 0.0
+
+        Path(f.name).unlink()
+
+
 def test_output_writer():
     """Test JSON output writer."""
     from lpr.output import JSONOutputWriter

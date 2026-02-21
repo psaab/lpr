@@ -51,7 +51,7 @@
 Video Source (RTSP/file)
     |
     v
-Frame Capture (OpenCV)                 stream.py
+Frame Capture (PyAV / ffmpeg / OpenCV) stream.py
     |
     v
 Plate Detection (YOLOv9 / open-image-models)  detector.py
@@ -133,6 +133,23 @@ Each detection produces a JSON object:
 - Filters readings to dominant text length before voting
 - Configurable minimum readings (default: 3) and agreement threshold (default: 0.6)
 - Single emission per plate track (no duplicates)
+
+## Video Decode Fallback Chain
+
+The stream reader tries decode backends in order, falling through on failure:
+
+1. **PyAV + CUDA** — embedded ffmpeg with GPU decode (if `av` installed and `h264_cuvid` available)
+2. **PyAV software** — embedded ffmpeg, CPU decode (if `av` installed)
+3. **ffmpeg subprocess** — pipes NV12 frames through stdin (if `ffmpeg` binary available)
+4. **OpenCV VideoCapture** — final fallback, software decode
+
+PyAV (`av` package) provides Python bindings to FFmpeg's libav* libraries. Frames
+are decoded to `VideoFrame` objects and converted directly to BGR numpy arrays via
+`frame.to_ndarray(format="bgr24")` — no NV12 conversion or pipe I/O needed.
+
+Frame skipping: all backends decode every frame (can't skip P/B-frame dependencies),
+but only convert to numpy on every Nth frame. The ffmpeg subprocess path uses a
+`select` filter to skip at the demuxer level.
 
 ## Threading Model
 
