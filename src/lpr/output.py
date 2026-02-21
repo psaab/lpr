@@ -21,6 +21,8 @@ class DetectionRecord:
     bbox: tuple[int, int, int, int]
     source: str
     detected_at: str
+    consensus_count: int = 0
+    consensus_confidence: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -79,6 +81,8 @@ class JSONOutputWriter:
         frame_number: int,
         bbox: tuple[int, int, int, int],
         source: str,
+        consensus_count: int = 0,
+        consensus_confidence: float = 0.0,
     ) -> DetectionRecord:
         return DetectionRecord(
             plate_text=plate_text,
@@ -88,4 +92,6 @@ class JSONOutputWriter:
             bbox=bbox,
             source=source,
             detected_at=datetime.now(timezone.utc).isoformat(),
+            consensus_count=consensus_count,
+            consensus_confidence=consensus_confidence,
         )

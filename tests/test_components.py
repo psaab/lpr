@@ -83,18 +83,19 @@ def test_output_writer():
 
 
 def test_reader_preprocess():
-    """Test that PlateReader preprocessing works."""
+    """Test that PlateReader preprocessing returns multiple variants."""
     from lpr.reader import PlateReader
 
-    reader = PlateReader(device="cpu")
+    reader = PlateReader(device="cpu", ocr_engine="fast-plate-ocr")
 
     # Create a small test plate image
     plate = np.ones((30, 100, 3), dtype=np.uint8) * 255
     cv2.putText(plate, "TEST", (5, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
-    processed = reader._preprocess(plate)
-    assert len(processed.shape) == 2  # grayscale
-    assert processed.shape[1] >= 100  # at least 100px wide
+    variants = reader._preprocess(plate)
+    assert isinstance(variants, list)
+    assert len(variants) == 3
+    assert len(variants[0].shape) == 2  # grayscale
 
 
 def test_config_resolve_device():
@@ -107,3 +108,111 @@ def test_config_resolve_device():
     config = Config(device="auto")
     device = config.resolve_device()
     assert device in ("cpu", "cuda")
+
+
+def test_reader_deskew():
+    """Test that PlateReader deskew corrects rotated images."""
+    from lpr.reader import PlateReader
+
+    reader = PlateReader(device="cpu")
+
+    # Create a small plate image
+    plate = np.ones((60, 200, 3), dtype=np.uint8) * 255
+    cv2.putText(plate, "TEST123", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+
+    # Rotate it by 10 degrees
+    h, w = plate.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), 10, 1.0)
+    rotated = cv2.warpAffine(plate, M, (w, h), borderValue=(255, 255, 255))
+
+    result = reader._deskew(rotated)
+    assert result.shape[:2] == rotated.shape[:2]
+
+
+def test_consensus_basic():
+    """Test that consensus emits after min_readings are reached."""
+    from lpr.consensus import PlateConsensus, PlateReading
+
+    consensus = PlateConsensus(min_readings=3)
+    bbox = (100, 200, 300, 250)
+
+    for i in range(3):
+        reading = PlateReading(
+            text="ABC1234", confidence=0.9, bbox=bbox,
+            frame_number=i + 1, timestamp=float(i), source="test.mp4",
+        )
+        result = consensus.add_reading(reading)
+        if i < 2:
+            assert result is None
+
+    assert result is not None
+    assert result.text == "ABC1234"
+    assert result.reading_count == 3
+
+
+def test_consensus_majority_vote():
+    """Test that consensus uses character-level majority voting."""
+    from lpr.consensus import PlateConsensus, PlateReading
+
+    consensus = PlateConsensus(min_readings=3)
+    bbox = (100, 200, 300, 250)
+    texts = ["ABC1234", "A8C1234", "ABC1234"]
+
+    for i, text in enumerate(texts):
+        reading = PlateReading(
+            text=text, confidence=0.9, bbox=bbox,
+            frame_number=i + 1, timestamp=float(i), source="test.mp4",
+        )
+        result = consensus.add_reading(reading)
+
+    assert result is not None
+    assert result.text == "ABC1234"
+
+
+def test_consensus_no_double_emit():
+    """Test that a track only emits once."""
+    from lpr.consensus import PlateConsensus, PlateReading
+
+    consensus = PlateConsensus(min_readings=3)
+    bbox = (100, 200, 300, 250)
+
+    for i in range(3):
+        reading = PlateReading(
+            text="XYZ5678", confidence=0.9, bbox=bbox,
+            frame_number=i + 1, timestamp=float(i), source="test.mp4",
+        )
+        consensus.add_reading(reading)
+
+    # Add more readings to the same track
+    for i in range(3, 6):
+        reading = PlateReading(
+            text="XYZ5678", confidence=0.9, bbox=bbox,
+            frame_number=i + 1, timestamp=float(i), source="test.mp4",
+        )
+        result = consensus.add_reading(reading)
+        assert result is None  # should not emit again
+
+
+def test_output_writer_with_consensus():
+    """Test JSON output writer with consensus fields."""
+    from lpr.output import JSONOutputWriter
+
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+        output_path = Path(f.name)
+
+    writer = JSONOutputWriter(output_path)
+    with writer:
+        record = writer.make_record(
+            plate_text="ABC1234", confidence=0.95, timestamp=1.5,
+            frame_number=10, bbox=(100, 200, 300, 250), source="test.mp4",
+            consensus_count=5, consensus_confidence=0.92,
+        )
+        writer.write(record)
+
+    with open(output_path) as f:
+        data = json.loads(f.readline())
+
+    assert data["consensus_count"] == 5
+    assert data["consensus_confidence"] == 0.92
+
+    output_path.unlink()

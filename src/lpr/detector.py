@@ -1,10 +1,9 @@
-"""License plate detector using YOLOv8."""
+"""License plate detector using open-image-models with YOLO fallback."""
 
 import logging
 from dataclasses import dataclass
 
 import numpy as np
-from ultralytics import YOLO
 
 logger = logging.getLogger("lpr.detector")
 
@@ -19,38 +18,93 @@ class Detection:
 
 
 class PlateDetector:
-    """Detects license plates in video frames using YOLOv8."""
+    """Detects license plates using open-image-models with YOLO legacy fallback."""
 
-    # COCO class indices that might contain vehicles/plates
-    # We'll use a license-plate-specific model if available,
-    # otherwise fall back to general object detection
+    # COCO class indices for vehicles (used by legacy YOLO path)
     VEHICLE_CLASSES = {2, 3, 5, 7}  # car, motorcycle, bus, truck
 
-    def __init__(self, device: str = "cpu", confidence: float = 0.5):
+    def __init__(
+        self,
+        device: str = "cpu",
+        confidence: float = 0.5,
+        detection_model: str = "yolo-v9-t-384-license-plate-end2end",
+        use_legacy: bool = False,
+    ):
         self.device = device
         self.confidence = confidence
-        self._model: YOLO | None = None
-        self._is_plate_model = False
+        self.detection_model = detection_model
+        self._model = None
+        self._legacy = use_legacy
 
     def load_model(self) -> None:
-        """Load the YOLO model."""
-        # Try to load a license plate detection model first
-        # Fall back to general YOLOv8 for vehicle detection
+        """Load the detection model."""
+        if self._legacy:
+            self._load_legacy()
+            return
+
         try:
-            self._model = YOLO("yolov8n.pt")
-            self._is_plate_model = False
-            logger.info(
-                "Loaded YOLOv8n model on device=%s (vehicle detection mode)",
-                self.device,
+            from open_image_models import LicensePlateDetector
+
+            self._model = LicensePlateDetector(
+                detection_model=self.detection_model,
+                conf_thresh=self.confidence,
             )
-        except Exception as e:
-            raise RuntimeError(f"Failed to load YOLO model: {e}") from e
+            logger.info(
+                "Loaded open-image-models detector (model=%s, conf=%.2f)",
+                self.detection_model,
+                self.confidence,
+            )
+        except ImportError:
+            logger.warning(
+                "open-image-models not available, falling back to legacy YOLO"
+            )
+            self._load_legacy()
+
+    def _load_legacy(self) -> None:
+        """Load the legacy YOLO model."""
+        from ultralytics import YOLO
+
+        self._model = YOLO("yolov8n.pt")
+        self._legacy = True
+        logger.info(
+            "Loaded YOLOv8n model on device=%s (legacy vehicle detection mode)",
+            self.device,
+        )
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
-        """Detect license plates (or vehicles) in a frame."""
+        """Detect license plates in a frame."""
         if self._model is None:
             self.load_model()
 
+        if self._legacy:
+            return self._detect_legacy(frame)
+
+        results = self._model.predict(frame)
+        h, w = frame.shape[:2]
+        detections = []
+
+        for result in results:
+            bb = result.bounding_box
+            x1 = max(0, int(bb.x1))
+            y1 = max(0, int(bb.y1))
+            x2 = min(w, int(bb.x2))
+            y2 = min(h, int(bb.y2))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            plate_image = frame[y1:y2, x1:x2]
+            if plate_image.size > 0:
+                detections.append(Detection(
+                    bbox=(x1, y1, x2, y2),
+                    confidence=result.confidence,
+                    plate_image=plate_image,
+                ))
+
+        return detections
+
+    def _detect_legacy(self, frame: np.ndarray) -> list[Detection]:
+        """Detect plates using legacy YOLO vehicle detection + contour extraction."""
         results = self._model(
             frame,
             device=self.device,
@@ -68,13 +122,11 @@ class PlateDetector:
                 cls = int(boxes.cls[i])
                 conf = float(boxes.conf[i])
 
-                # If using general model, only look at vehicles
-                if not self._is_plate_model and cls not in self.VEHICLE_CLASSES:
+                if cls not in self.VEHICLE_CLASSES:
                     continue
 
                 x1, y1, x2, y2 = map(int, boxes.xyxy[i].tolist())
 
-                # Ensure valid crop region
                 h, w = frame.shape[:2]
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
@@ -82,12 +134,7 @@ class PlateDetector:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                if self._is_plate_model:
-                    plate_img = frame[y1:y2, x1:x2]
-                else:
-                    # For vehicle detections, try to find the plate region
-                    # within the lower portion of the vehicle bounding box
-                    plate_img = self._extract_plate_region(frame, x1, y1, x2, y2)
+                plate_img = self._extract_plate_region(frame, x1, y1, x2, y2)
 
                 if plate_img is not None and plate_img.size > 0:
                     detections.append(Detection(

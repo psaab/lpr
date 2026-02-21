@@ -1,10 +1,11 @@
-"""Processing pipeline - orchestrates detection, OCR, and output."""
+"""Processing pipeline - orchestrates detection, OCR, consensus, and output."""
 
 import logging
 import time
 from pathlib import Path
 
 from .config import Config
+from .consensus import PlateConsensus, PlateReading
 from .detector import PlateDetector
 from .output import JSONOutputWriter
 from .reader import PlateReader
@@ -19,8 +20,17 @@ class Pipeline:
     def __init__(self, config: Config):
         self.config = config
         self._device = config.resolve_device()
-        self._seen_plates: dict[str, float] = {}  # plate_text -> last_seen_time
-        self._stats = {"frames": 0, "detections": 0, "plates_read": 0}
+        self._consensus = PlateConsensus(
+            min_readings=config.min_readings,
+            consensus_threshold=config.consensus_threshold,
+            track_timeout=config.track_timeout,
+        )
+        self._stats = {
+            "frames": 0,
+            "detections": 0,
+            "plates_read": 0,
+            "consensus_emitted": 0,
+        }
 
     def run(self) -> None:
         """Run the pipeline on the configured video source."""
@@ -36,10 +46,15 @@ class Pipeline:
         detector = PlateDetector(
             device=self._device,
             confidence=self.config.confidence_threshold,
+            detection_model=self.config.detection_model,
+            use_legacy=self.config.use_legacy_detector,
         )
         detector.load_model()
 
-        reader = PlateReader(device=self._device)
+        reader = PlateReader(
+            device=self._device,
+            ocr_engine=self.config.ocr_engine,
+        )
         reader.load_model()
 
         writer = JSONOutputWriter(Path(self.config.output_path))
@@ -52,26 +67,33 @@ class Pipeline:
                     self._stats["frames"] += 1
                     self._process_frame(frame, detector, reader, writer)
 
+                    if self._stats["frames"] % 50 == 0:
+                        self._consensus.prune_stale_tracks(time.time())
+
                     if self._stats["frames"] % 100 == 0:
                         logger.info(
-                            "Progress: %d frames, %d detections, %d plates read",
+                            "Progress: %d frames, %d detections, "
+                            "%d plates read, %d consensus emitted",
                             self._stats["frames"],
                             self._stats["detections"],
                             self._stats["plates_read"],
+                            self._stats["consensus_emitted"],
                         )
         except KeyboardInterrupt:
             logger.info("Pipeline interrupted by user")
         finally:
             stream.close()
             logger.info(
-                "Pipeline finished. Stats: %d frames, %d detections, %d plates",
+                "Pipeline finished. Stats: %d frames, %d detections, "
+                "%d plates read, %d consensus emitted",
                 self._stats["frames"],
                 self._stats["detections"],
                 self._stats["plates_read"],
+                self._stats["consensus_emitted"],
             )
 
     def _process_frame(self, frame, detector, reader, writer):
-        """Process a single frame through detection and OCR."""
+        """Process a single frame through detection, OCR, and consensus."""
         from .stream import Frame
 
         detections = detector.detect(frame.image)
@@ -82,33 +104,41 @@ class Pipeline:
             if plate is None or not plate.text:
                 continue
 
-            # Deduplication: skip if we saw this plate recently
-            now = time.time()
-            last_seen = self._seen_plates.get(plate.text)
-            if last_seen and (now - last_seen) < self.config.dedup_seconds:
-                continue
-
-            self._seen_plates[plate.text] = now
             self._stats["plates_read"] += 1
 
-            record = writer.make_record(
-                plate_text=plate.text,
+            reading = PlateReading(
+                text=plate.text,
                 confidence=plate.confidence,
-                timestamp=frame.timestamp,
-                frame_number=frame.frame_number,
                 bbox=detection.bbox,
+                frame_number=frame.frame_number,
+                timestamp=frame.timestamp,
                 source=frame.source,
+            )
+
+            result = self._consensus.add_reading(reading)
+            if result is None:
+                continue
+
+            self._stats["consensus_emitted"] += 1
+
+            record = writer.make_record(
+                plate_text=result.text,
+                confidence=plate.confidence,
+                timestamp=result.last_seen,
+                frame_number=result.frame_number,
+                bbox=result.bbox,
+                source=result.source,
+                consensus_count=result.reading_count,
+                consensus_confidence=result.consensus_confidence,
             )
             writer.write(record)
 
             logger.info(
-                "Plate detected: %s (confidence: %.2f) at frame %d",
-                plate.text, plate.confidence, frame.frame_number,
+                "Plate consensus: %s (confidence: %.2f, readings: %d, "
+                "consensus: %.2f) at frame %d",
+                result.text,
+                plate.confidence,
+                result.reading_count,
+                result.consensus_confidence,
+                result.frame_number,
             )
-
-        # Prune old entries from seen_plates
-        now = time.time()
-        cutoff = now - self.config.dedup_seconds * 3
-        self._seen_plates = {
-            k: v for k, v in self._seen_plates.items() if v > cutoff
-        }

@@ -4,25 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lpr"
-version = "0.1.0"
+version = "0.2.0"
 description = "License Plate Recognition daemon with CUDA/CPU ML inference"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "ultralytics>=8.0",
-    "easyocr>=1.7",
+    "open-image-models[onnx]",
+    "fast-plate-ocr[onnx]",
     "opencv-python-headless>=4.8",
     "numpy>=1.24",
-    "torch>=2.0",
-    "torchvision>=0.15",
     "supervision>=0.18",
 ]
 
 [project.optional-dependencies]
-cuda = [
+legacy = [
+    "ultralytics>=8.0",
+    "easyocr>=1.7",
     "torch>=2.0",
     "torchvision>=0.15",
+]
+gpu = [
+    "onnxruntime-gpu",
 ]
 dev = [
     "pytest>=7.0",

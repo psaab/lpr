@@ -48,8 +48,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
     parser.add_argument(
         "-c", "--confidence",
         type=float,
-        default=0.5,
-        help="Minimum detection confidence (default: 0.5)",
+        default=0.3,
+        help="Minimum detection confidence (default: 0.3)",
     )
     parser.add_argument(
         "-s", "--frame-skip",
@@ -84,6 +84,34 @@ def parse_args(argv: list[str] | None = None) -> Config:
         default=5.0,
         help="Seconds to suppress duplicate plate readings (default: 5.0)",
     )
+    parser.add_argument(
+        "--min-readings",
+        type=int,
+        default=3,
+        help="Minimum plate readings before consensus (default: 3)",
+    )
+    parser.add_argument(
+        "--consensus-threshold",
+        type=float,
+        default=0.6,
+        help="Minimum agreement ratio for consensus (default: 0.6)",
+    )
+    parser.add_argument(
+        "--ocr-engine",
+        choices=["fast-plate-ocr", "easyocr"],
+        default="fast-plate-ocr",
+        help="OCR engine to use (default: fast-plate-ocr)",
+    )
+    parser.add_argument(
+        "--detection-model",
+        default="yolo-v9-t-384-license-plate-end2end",
+        help="Detection model name (default: yolo-v9-t-384-license-plate-end2end)",
+    )
+    parser.add_argument(
+        "--legacy-detector",
+        action="store_true",
+        help="Use legacy YOLO+contour detection instead of dedicated plate detector",
+    )
 
     args = parser.parse_args(argv)
 
@@ -98,6 +126,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
         log_level=args.log_level,
         log_file=Path(args.log_file) if args.log_file else None,
         dedup_seconds=args.dedup_seconds,
+        min_readings=args.min_readings,
+        consensus_threshold=args.consensus_threshold,
+        ocr_engine=args.ocr_engine,
+        detection_model=args.detection_model,
+        use_legacy_detector=args.legacy_detector,
     )
 
 

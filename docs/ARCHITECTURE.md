@@ -24,9 +24,19 @@
     |         |
     |         v
     |    +----+----+
+    |    | Deskew  |   reader.py
+    |    +---------+
+    |         |
+    |         v
+    |    +----+----+
     |    | Reader  |   reader.py
     |    | (OCR)   |
     |    +---------+
+    |         |
+    |         v
+    |    +----+------+
+    |    | Consensus |  consensus.py
+    |    +-----------+
     |
     v
 +---+------------+
@@ -41,23 +51,30 @@
 Video Source (RTSP/file)
     |
     v
-Frame Capture (OpenCV)          stream.py
+Frame Capture (OpenCV)                 stream.py
     |
     v
-Plate Detection (YOLOv8)        detector.py
-    |  returns: bounding boxes + confidence scores
+Plate Detection (YOLOv9 / open-image-models)  detector.py
+    |  returns: plate bounding boxes + confidence scores
     v
-Plate Crop (OpenCV)              pipeline.py
+Plate Crop                             detector.py
     |  extracts plate region from frame
     v
-OCR Recognition (EasyOCR)        reader.py
-    |  returns: plate text + confidence
+Deskew Preprocessing                   reader.py
+    |  straightens rotated plates via minAreaRect
     v
-Deduplication / Tracking         pipeline.py
-    |  filters duplicate reads within time window
+OCR Recognition (fast-plate-ocr)       reader.py
+    |  returns: plate text + per-character confidence
     v
-JSON Output                      output.py
-    |  writes JSONL record to file or stdout
+Format Correction                      reader.py
+    |  fixes OCR confusables using known plate formats
+    v
+Consensus Voting                       consensus.py
+    |  character-level majority vote across multiple frames
+    |  emits once per plate track when agreement threshold met
+    v
+JSON Output                            output.py
+    |  writes JSONL record to file
     v
 Consumer (log, database, alert)
 ```
@@ -68,33 +85,54 @@ Each detection produces a JSON object:
 
 ```json
 {
-  "timestamp": "2026-02-19T14:30:05.123456",
-  "plate_text": "ABC1234",
+  "plate_text": "93508B3",
   "confidence": 0.94,
+  "timestamp": 1.5,
+  "frame_number": 45,
   "bbox": [120, 340, 280, 390],
   "source": "rtsp://camera1.local/stream",
-  "frame_number": 4521
+  "detected_at": "2026-02-20T14:30:05.123456+00:00",
+  "consensus_count": 5,
+  "consensus_confidence": 0.95
 }
 ```
 
 ## ML Model Details
 
-### Detection: YOLOv8
+### Detection: YOLOv9 License Plate Detector
 
-- **Model**: YOLOv8n (nano) or YOLOv8s (small) from ultralytics
-- **Task**: Object detection -- locating license plates in video frames
+- **Package**: `open-image-models` (ONNX Runtime backend)
+- **Model**: `yolo-v9-t-384-license-plate-end2end` (96.6% mAP50)
+- **Task**: Direct license plate bounding box detection (no vehicle detection step)
 - **Input**: Video frame (BGR, any resolution)
-- **Output**: Bounding boxes with confidence scores
-- **Performance**: YOLOv8n runs at 30+ FPS on modern GPUs, 5-10 FPS on CPU
-- **Custom models**: Supports loading fine-tuned `.pt` weights via `--model` flag
+- **Output**: Plate bounding boxes with confidence scores
+- **Runtime**: ONNX Runtime with CUDAExecutionProvider (auto-detected)
+- **Legacy fallback**: YOLOv8n via ultralytics (vehicle detection + contour extraction)
 
-### Recognition: EasyOCR
+### Recognition: fast-plate-ocr
 
+- **Package**: `fast-plate-ocr` (ONNX Runtime backend)
+- **Model**: `global-plates-mobile-vit-v2-model` (MobileViT-v2 architecture)
 - **Task**: Reading text from cropped plate images
-- **Input**: Cropped plate image (BGR)
-- **Output**: Recognized text string with confidence score
-- **Languages**: Configurable, defaults to English (`en`)
-- **GPU support**: Uses CUDA when available for faster inference
+- **Input**: Preprocessed grayscale plate image
+- **Output**: Plate text string + per-character confidence scores
+- **Runtime**: ONNX Runtime with CUDAExecutionProvider (auto-detected)
+- **Legacy fallback**: EasyOCR with multi-variant preprocessing
+
+### Preprocessing Pipeline
+
+1. **Deskew**: Detect plate rotation via `cv2.minAreaRect`, correct angles up to 15°
+2. **Grayscale conversion** + upscaling (small plates → 200px minimum width)
+3. **CLAHE enhancement** + bilateral denoising (primary variant)
+4. **Adaptive threshold** and **Otsu threshold** (additional variants for EasyOCR)
+
+### Consensus Voting
+
+- Tracks plates across frames using IoU (≥0.3) and centroid distance (≤100px) matching
+- Character-level weighted majority vote using per-reading confidence
+- Filters readings to dominant text length before voting
+- Configurable minimum readings (default: 3) and agreement threshold (default: 0.6)
+- Single emission per plate track (no duplicates)
 
 ## Threading Model
 
@@ -106,6 +144,7 @@ Main Thread                     Capture Thread
 |           |                   |  loop        |
 | detect()  |                   |              |
 | read()    |                   | cv2.read()   |
+| consensus |                   |              |
 | output()  |                   |              |
 +-----------+                   +--------------+
 ```
@@ -113,8 +152,9 @@ Main Thread                     Capture Thread
 - **Capture thread**: Continuously reads frames from the video source into a
   bounded queue. This prevents the pipeline from blocking on I/O and handles
   RTSP stream buffering.
-- **Main thread**: Pulls frames from the queue, runs detection and OCR, writes
-  output. Runs the pipeline loop and handles signal-based shutdown.
+- **Main thread**: Pulls frames from the queue, runs detection, OCR, consensus
+  voting, and writes output. Runs the pipeline loop and handles signal-based
+  shutdown.
 - **Queue**: Bounded to prevent memory growth when processing is slower than
   capture. Oldest frames are dropped when the queue is full.
 
@@ -122,30 +162,30 @@ Main Thread                     Capture Thread
 
 The system auto-detects the best available compute device:
 
-1. Check for CUDA-capable GPU via `torch.cuda.is_available()`
-2. If CUDA is available, use GPU for both YOLOv8 and EasyOCR
-3. If no GPU, fall back to CPU inference
-4. Device can be overridden via `--device cpu` or `--device cuda`
-
-```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
-```
+1. Check for CUDA via ONNX Runtime CUDAExecutionProvider (primary models)
+2. Optionally check `torch.cuda.is_available()` (legacy models)
+3. If CUDA is available, use GPU for inference
+4. If no GPU, fall back to CPU inference
+5. Device can be overridden via `--device cpu` or `--device cuda`
 
 ## Configuration Options Reference
 
-| Option              | CLI Flag            | Default        | Description                          |
-|---------------------|---------------------|----------------|--------------------------------------|
-| Video source        | `--source`          | (required)     | RTSP URL or path to video file       |
-| Output file         | `--output`          | stdout         | Path to JSONL output file            |
-| Detection model     | `--model`           | `yolov8n.pt`   | Path to YOLOv8 weights               |
-| Confidence threshold| `--confidence`      | `0.5`          | Minimum detection confidence         |
-| Device              | `--device`          | `auto`         | Compute device: auto, cpu, cuda      |
-| Frame skip          | `--frame-skip`      | `0`            | Process every Nth frame (0 = all)    |
-| Dedup window        | `--dedup-seconds`   | `5`            | Suppress duplicate plates for N secs |
-| Daemon mode         | `--daemon`          | `false`        | Run as background daemon             |
-| PID file            | `--pid-file`        | `/tmp/lpr.pid` | PID file path (daemon mode)          |
-| Log level           | `--log-level`       | `INFO`         | Logging verbosity                    |
-| OCR languages       | `--languages`       | `en`           | Comma-separated EasyOCR languages    |
+| Option               | CLI Flag                | Default                                    | Description                          |
+|----------------------|-------------------------|--------------------------------------------|--------------------------------------|
+| Video source         | positional              | (required)                                 | RTSP URL or path to video file       |
+| Output file          | `--output`              | `detections.jsonl`                         | Path to JSONL output file            |
+| Confidence threshold | `--confidence`          | `0.5`                                      | Minimum detection confidence         |
+| Device               | `--device`              | `auto`                                     | Compute device: auto, cpu, cuda      |
+| Frame skip           | `--frame-skip`          | `5`                                        | Process every Nth frame              |
+| Dedup window         | `--dedup-seconds`       | `5`                                        | Suppress duplicate plates for N secs |
+| Min readings         | `--min-readings`        | `3`                                        | Readings before consensus vote       |
+| Consensus threshold  | `--consensus-threshold` | `0.6`                                      | Minimum agreement for consensus      |
+| OCR engine           | `--ocr-engine`          | `fast-plate-ocr`                           | OCR backend: fast-plate-ocr, easyocr |
+| Detection model      | `--detection-model`     | `yolo-v9-t-384-license-plate-end2end`      | open-image-models model name         |
+| Legacy detector      | `--legacy-detector`     | off                                        | Use YOLOv8 + contour extraction      |
+| Daemon mode          | `--daemon`              | off                                        | Run as background daemon             |
+| PID file             | `--pid-file`            | `/tmp/lpr.pid`                             | PID file path (daemon mode)          |
+| Log level            | `--log-level`           | `INFO`                                     | Logging verbosity                    |
 
 ## Error Handling
 
@@ -153,5 +193,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
   (RTSP streams). Exit with error for video files.
 - **Detection failure**: Log warning, skip frame, continue processing.
 - **OCR failure**: Log warning, record detection without plate text.
+- **Model fallback**: If open-image-models or fast-plate-ocr unavailable,
+  automatically falls back to legacy ultralytics/easyocr backends.
 - **Signal handling**: SIGTERM and SIGINT trigger graceful shutdown -- finish
   current frame, flush output, remove PID file, exit cleanly.

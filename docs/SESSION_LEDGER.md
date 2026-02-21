@@ -1,5 +1,53 @@
 # Session Ledger
 
+## 2026-02-20 -- Accuracy Improvements (v0.2.0)
+
+### Session Summary
+
+Upgraded the LPR daemon from v0.1.0 to v0.2.0 with four major accuracy
+improvements: dedicated plate detection, purpose-built plate OCR, multi-frame
+consensus voting, and deskew preprocessing.
+
+### Environment
+
+- **OS**: Linux (Debian-based)
+- **Python**: 3.13
+- **GPU**: NVIDIA (CUDA via ONNX Runtime)
+
+### Decisions Made
+
+| Decision | Rationale |
+|----------|-----------|
+| open-image-models YOLOv9 for detection | 96.6% mAP50 on plate detection, direct plate bbox without vehicle detection step, ONNX Runtime backend |
+| fast-plate-ocr MobileViT-v2 for OCR | Purpose-built for license plates, per-character confidence, ONNX Runtime backend, faster than EasyOCR |
+| ONNX Runtime instead of PyTorch | Lighter dependency, both new models use ONNX, CUDAExecutionProvider for GPU |
+| Character-level consensus voting | More robust than string-level voting -- individual OCR errors get outvoted across frames |
+| Weighted majority vote by confidence | Higher-confidence readings have more influence on consensus |
+| Deskew via minAreaRect | Simple and effective for moderate rotation, skip extreme angles to avoid false corrections |
+| Legacy fallback flags | Backward compatibility for environments where new packages aren't installed |
+| Keep format correction logic | Still valuable on top of fast-plate-ocr for US plate pattern enforcement |
+
+### What Changed
+
+- **pyproject.toml**: Replaced ultralytics/easyocr/torch with open-image-models/fast-plate-ocr/onnxruntime-gpu
+- **config.py**: Added consensus, engine selection, and detection model fields; torch import now optional
+- **cli.py**: Added --min-readings, --consensus-threshold, --ocr-engine, --detection-model, --legacy-detector
+- **output.py**: Added consensus_count and consensus_confidence to DetectionRecord
+- **consensus.py**: NEW -- PlateConsensus with IoU/centroid tracking and character-level majority vote
+- **detector.py**: Primary path uses open-image-models LicensePlateDetector; legacy YOLO+contour preserved
+- **reader.py**: Primary OCR via fast-plate-ocr with deskew preprocessing; EasyOCR preserved as fallback
+- **pipeline.py**: Replaced _seen_plates dedup with consensus system; passes new config to detector/reader
+
+### Lessons Learned
+
+- open-image-models returns DetectionResult objects with .bounding_box.{x1,y1,x2,y2} API
+- fast-plate-ocr pads output with '_' characters that must be stripped; confidence is per-character-slot
+- Both packages use ONNX Runtime and auto-detect CUDA, no torch dependency needed
+- Consensus voting eliminates the need for simple time-based deduplication
+- Deskew with minAreaRect is effective but needs angle normalization and bounds checking
+
+---
+
 ## 2026-02-19 -- Initial Build
 
 ### Session Summary

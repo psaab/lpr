@@ -11,6 +11,15 @@ import numpy as np
 
 logger = logging.getLogger("lpr.stream")
 
+# Map of cv2 HW acceleration constants to human-readable names
+_HW_ACCEL_NAMES = {}
+for _attr in ("VIDEO_ACCELERATION_NONE", "VIDEO_ACCELERATION_ANY",
+              "VIDEO_ACCELERATION_D3D11", "VIDEO_ACCELERATION_VAAPI",
+              "VIDEO_ACCELERATION_MFX"):
+    _val = getattr(cv2, _attr, None)
+    if _val is not None:
+        _HW_ACCEL_NAMES[_val] = _attr.replace("VIDEO_ACCELERATION_", "").lower()
+
 
 @dataclass
 class Frame:
@@ -40,24 +49,64 @@ class StreamReader:
         self._cap: cv2.VideoCapture | None = None
 
     def _open(self) -> cv2.VideoCapture:
-        """Open the video source."""
+        """Open the video source, trying HW-accelerated decode first."""
         if not self._is_stream:
             path = Path(self.source)
             if not path.exists():
                 raise FileNotFoundError(f"Video file not found: {self.source}")
 
+        cap = self._try_hw_open()
+        if cap is not None:
+            return cap
+
+        # Fallback: standard software decode
         cap = cv2.VideoCapture(self.source)
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video source: {self.source}")
 
+        self._log_source_info(cap, "software decode")
+        return cap
+
+    def _try_hw_open(self) -> cv2.VideoCapture | None:
+        """Attempt to open with hardware-accelerated decoding."""
+        hw_any = getattr(cv2, "VIDEO_ACCELERATION_ANY", None)
+        hw_prop = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+        if hw_any is None or hw_prop is None:
+            return None
+
+        try:
+            cap = cv2.VideoCapture(
+                self.source, cv2.CAP_FFMPEG,
+                [hw_prop, hw_any],
+            )
+        except Exception:
+            return None
+
+        if not cap.isOpened():
+            cap.release()
+            return None
+
+        # Check if HW accel actually activated
+        active = cap.get(hw_prop)
+        hw_name = _HW_ACCEL_NAMES.get(int(active), f"unknown({int(active)})")
+
+        if active and active != getattr(cv2, "VIDEO_ACCELERATION_NONE", 0):
+            self._log_source_info(cap, f"HW decode ({hw_name})")
+            return cap
+
+        # Opened successfully but no HW accel — still usable
+        self._log_source_info(cap, "software decode (HW not available)")
+        return cap
+
+    def _log_source_info(self, cap: cv2.VideoCapture, decode_mode: str) -> None:
+        """Log video source properties."""
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 0
         logger.info(
-            "Opened source: %s (%dx%d @ %.1f fps)",
-            self.source, width, height, fps,
+            "Opened source: %s (%dx%d @ %.1f fps, %s)",
+            self.source, width, height, fps, decode_mode,
         )
-        return cap
 
     def frames(self) -> Generator[Frame, None, None]:
         """Yield frames from the video source."""
