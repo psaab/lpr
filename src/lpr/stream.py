@@ -135,12 +135,16 @@ class StreamReader:
         else:
             out_w, out_h = src_w, src_h
 
-        nv12_out = ["-f", "rawvideo", "-pix_fmt", "nv12", "-v", "error", "-"]
+        # Frame selection filter — have ffmpeg drop frames we'd skip anyway,
+        # reducing pipe I/O by ~80% for frame_skip=5
+        select_filter = f"select=not(mod(n\\,{self.frame_skip}))"
+
+        nv12_out = ["-vsync", "drop", "-f", "rawvideo", "-pix_fmt", "nv12", "-v", "error", "-"]
 
         if "cuda" in hwaccels:
             if need_scale:
-                # Strategy 1: CUDA decode + GPU scale + NV12 output
-                vf = f"scale_cuda=w={out_w}:h={out_h},hwdownload,format=nv12"
+                # Strategy 1: CUDA decode + GPU scale + frame select + NV12 output
+                vf = f"scale_cuda=w={out_w}:h={out_h},hwdownload,format=nv12,{select_filter}"
                 cmd = [
                     ffmpeg,
                     "-hwaccel", "cuda",
@@ -152,22 +156,24 @@ class StreamReader:
                     (cmd, out_w, out_h, f"HW decode + GPU scale {src_w}x{src_h}->{out_w}x{out_h}")
                 )
 
-            # Strategy 2: CUDA decode + NV12 output (no CPU swscale)
+            # Strategy 2: CUDA decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
                 "-hwaccel", "cuda",
                 "-i", self.source,
+                "-vf", select_filter,
             ] + nv12_out
             strategies.append(
                 (cmd, src_w, src_h, f"HW decode (cuda/nvdec)")
             )
 
         if "vaapi" in hwaccels:
-            # Strategy 3: VAAPI decode + NV12 output
+            # Strategy 3: VAAPI decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
                 "-hwaccel", "vaapi",
                 "-i", self.source,
+                "-vf", select_filter,
             ] + nv12_out
             strategies.append(
                 (cmd, src_w, src_h, f"HW decode (vaapi)")
@@ -244,8 +250,8 @@ class StreamReader:
             self._use_ffmpeg = True
 
             logger.info(
-                "Opened source: %s (%dx%d @ %.1f fps, %s via ffmpeg, NV12 output)",
-                self.source, out_w, out_h, self._fps, desc,
+                "Opened source: %s (%dx%d @ %.1f fps, %s via ffmpeg, NV12 output, select every %d frames)",
+                self.source, out_w, out_h, self._fps, desc, self.frame_skip,
             )
             return True
 
@@ -339,8 +345,12 @@ class StreamReader:
             time.sleep(self.reconnect_delay)
 
     def _frames_ffmpeg(self, start_frame: int) -> Generator[Frame, None, None]:
-        """Yield frames from ffmpeg subprocess (NV12 input, BGR output)."""
-        frame_number = start_frame
+        """Yield frames from ffmpeg subprocess (NV12 input, BGR output).
+
+        ffmpeg already applies frame selection (select filter), so every
+        frame read from the pipe is one we want to process.
+        """
+        received = 0
         w, h = self._out_width, self._out_height
         nv12_h = h * 3 // 2  # NV12 has 1.5x height
 
@@ -353,9 +363,9 @@ class StreamReader:
                     logger.info("End of video file reached")
                 return
 
-            frame_number += 1
-            if frame_number % self.frame_skip != 0:
-                continue
+            received += 1
+            # Map back to original frame number (ffmpeg selected every Nth)
+            frame_number = start_frame + received * self.frame_skip
 
             # Reshape as NV12 and convert to BGR
             nv12 = np.frombuffer(data, dtype=np.uint8).reshape((nv12_h, w))
