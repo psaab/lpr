@@ -14,6 +14,9 @@ import numpy as np
 
 logger = logging.getLogger("lpr.stream")
 
+# Max output height for GPU downscale — only scale if input exceeds this
+_MAX_OUTPUT_HEIGHT = 1080
+
 
 @dataclass
 class Frame:
@@ -107,10 +110,98 @@ class StreamReader:
         self._cap: cv2.VideoCapture | None = None
         self._proc: subprocess.Popen | None = None
         self._frame_size: int = 0
-        self._width: int = 0
-        self._height: int = 0
+        self._out_width: int = 0
+        self._out_height: int = 0
+        self._src_width: int = 0
+        self._src_height: int = 0
         self._fps: float = 0.0
         self._use_ffmpeg: bool = False
+
+    def _build_ffmpeg_strategies(
+        self, ffmpeg: str, hwaccels: list[str], src_w: int, src_h: int
+    ) -> list[tuple[list[str], int, int, str]]:
+        """Build a list of ffmpeg command strategies to try, best first.
+
+        Returns list of (cmd_args, output_width, output_height, description).
+        """
+        strategies = []
+
+        # Compute downscaled dimensions (even values required for NV12)
+        need_scale = src_h > _MAX_OUTPUT_HEIGHT
+        if need_scale:
+            out_h = _MAX_OUTPUT_HEIGHT
+            out_w = int(src_w * (out_h / src_h))
+            out_w = out_w + (out_w % 2)  # ensure even
+        else:
+            out_w, out_h = src_w, src_h
+
+        nv12_out = ["-f", "rawvideo", "-pix_fmt", "nv12", "-v", "error", "-"]
+
+        if "cuda" in hwaccels:
+            if need_scale:
+                # Strategy 1: CUDA decode + GPU scale + NV12 output
+                vf = f"scale_cuda=w={out_w}:h={out_h},hwdownload,format=nv12"
+                cmd = [
+                    ffmpeg,
+                    "-hwaccel", "cuda",
+                    "-hwaccel_output_format", "cuda",
+                    "-i", self.source,
+                    "-vf", vf,
+                ] + nv12_out
+                strategies.append(
+                    (cmd, out_w, out_h, f"HW decode + GPU scale {src_w}x{src_h}->{out_w}x{out_h}")
+                )
+
+            # Strategy 2: CUDA decode + NV12 output (no CPU swscale)
+            cmd = [
+                ffmpeg,
+                "-hwaccel", "cuda",
+                "-i", self.source,
+            ] + nv12_out
+            strategies.append(
+                (cmd, src_w, src_h, f"HW decode (cuda/nvdec)")
+            )
+
+        if "vaapi" in hwaccels:
+            # Strategy 3: VAAPI decode + NV12 output
+            cmd = [
+                ffmpeg,
+                "-hwaccel", "vaapi",
+                "-i", self.source,
+            ] + nv12_out
+            strategies.append(
+                (cmd, src_w, src_h, f"HW decode (vaapi)")
+            )
+
+        return strategies
+
+    def _try_ffmpeg_strategy(
+        self, cmd: list[str], out_w: int, out_h: int
+    ) -> bool:
+        """Try an ffmpeg command, return True if it produces a valid frame."""
+        frame_size = out_w * out_h * 3 // 2  # NV12: 1.5 bytes/pixel
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=frame_size * 4,
+            )
+            data = proc.stdout.read(frame_size)
+            # Clean up test process
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+            return len(data) == frame_size
+
+        except Exception:
+            return False
 
     def _open_ffmpeg(self) -> bool:
         """Try to open source with ffmpeg HW-accelerated decode."""
@@ -118,61 +209,32 @@ class StreamReader:
         if ffmpeg is None:
             return False
 
-        # Probe video metadata
         info = _probe_video(self.source)
         if info is None or info["width"] == 0:
             return False
 
-        self._width = info["width"]
-        self._height = info["height"]
+        self._src_width = info["width"]
+        self._src_height = info["height"]
         self._fps = info["fps"]
-        self._frame_size = self._width * self._height * 3
 
-        # Check for CUDA/NVDEC support
         hwaccels = _check_ffmpeg_hwaccel(ffmpeg)
-        hwaccel_args = []
-        decode_mode = "software decode"
+        strategies = self._build_ffmpeg_strategies(
+            ffmpeg, hwaccels, self._src_width, self._src_height
+        )
 
-        if "cuda" in hwaccels:
-            hwaccel_args = ["-hwaccel", "cuda"]
-            decode_mode = "HW decode (cuda/nvdec)"
-        elif "vaapi" in hwaccels:
-            hwaccel_args = ["-hwaccel", "vaapi"]
-            decode_mode = "HW decode (vaapi)"
-
-        if not hwaccel_args:
-            # No HW accel available — not worth using ffmpeg subprocess
-            # over OpenCV for software-only decode
+        if not strategies:
             return False
 
-        cmd = [ffmpeg]
-        cmd += hwaccel_args
-        cmd += [
-            "-i", self.source,
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-v", "error",
-            "-",
-        ]
+        for cmd, out_w, out_h, desc in strategies:
+            if not self._try_ffmpeg_strategy(cmd, out_w, out_h):
+                logger.debug("ffmpeg strategy failed: %s", desc)
+                continue
 
-        try:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=self._frame_size * 4,
-            )
-            # Read one frame to verify it works
-            data = self._proc.stdout.read(self._frame_size)
-            if len(data) != self._frame_size:
-                self._close_ffmpeg()
-                logger.debug("ffmpeg HW decode failed to produce frames, falling back")
-                return False
+            # Strategy works — open for real
+            self._out_width = out_w
+            self._out_height = out_h
+            self._frame_size = out_w * out_h * 3 // 2
 
-            # Push the frame back by restarting (we can't un-read from pipe)
-            self._close_ffmpeg()
-
-            # Re-open for real
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -182,15 +244,12 @@ class StreamReader:
             self._use_ffmpeg = True
 
             logger.info(
-                "Opened source: %s (%dx%d @ %.1f fps, %s via ffmpeg)",
-                self.source, self._width, self._height, self._fps, decode_mode,
+                "Opened source: %s (%dx%d @ %.1f fps, %s via ffmpeg, NV12 output)",
+                self.source, out_w, out_h, self._fps, desc,
             )
             return True
 
-        except Exception as e:
-            logger.debug("ffmpeg open failed: %s", e)
-            self._close_ffmpeg()
-            return False
+        return False
 
     def _close_ffmpeg(self) -> None:
         """Terminate ffmpeg subprocess."""
@@ -218,13 +277,13 @@ class StreamReader:
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video source: {self.source}")
 
-        self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._out_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self._out_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._fps = cap.get(cv2.CAP_PROP_FPS) or 0
 
         logger.info(
             "Opened source: %s (%dx%d @ %.1f fps, software decode via OpenCV)",
-            self.source, self._width, self._height, self._fps,
+            self.source, self._out_width, self._out_height, self._fps,
         )
         return cap
 
@@ -280,8 +339,10 @@ class StreamReader:
             time.sleep(self.reconnect_delay)
 
     def _frames_ffmpeg(self, start_frame: int) -> Generator[Frame, None, None]:
-        """Yield frames from ffmpeg subprocess."""
+        """Yield frames from ffmpeg subprocess (NV12 input, BGR output)."""
         frame_number = start_frame
+        w, h = self._out_width, self._out_height
+        nv12_h = h * 3 // 2  # NV12 has 1.5x height
 
         while self._proc is not None:
             data = self._proc.stdout.read(self._frame_size)
@@ -296,9 +357,10 @@ class StreamReader:
             if frame_number % self.frame_skip != 0:
                 continue
 
-            image = np.frombuffer(data, dtype=np.uint8).reshape(
-                (self._height, self._width, 3)
-            )
+            # Reshape as NV12 and convert to BGR
+            nv12 = np.frombuffer(data, dtype=np.uint8).reshape((nv12_h, w))
+            image = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+
             timestamp = frame_number / self._fps if self._fps > 0 else 0.0
 
             yield Frame(
