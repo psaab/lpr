@@ -490,7 +490,7 @@ class StreamReader:
                     timestamp=timestamp,
                     source=self.source,
                 )
-        except av.AVError as e:
+        except av.FFmpegError as e:
             if self._is_stream:
                 logger.warning("PyAV stream error: %s, will reconnect", e)
             else:
