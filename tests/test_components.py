@@ -1,6 +1,7 @@
 """Unit tests for LPR components."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -302,6 +303,84 @@ def test_output_record_with_vehicle():
     assert d["vehicle_color"] == "blue"
     assert d["vehicle_type"] == "truck"
     assert d["vehicle_make_model"] == "Ford F-150"
+
+
+def test_snapshot_path_expansion():
+    """Test that snapshot template variables expand correctly."""
+    from lpr.output import JSONOutputWriter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template = os.path.join(
+            tmpdir,
+            "{year}/{month}/{day}/{plate}_{hour}{minute}{second}_f{frame}_{source}.jpg",
+        )
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        # 2026-02-21 07:00:41 UTC => use a fixed timestamp
+        # datetime(2026, 2, 21, 7, 0, 41) as local time
+        from datetime import datetime
+        ts = datetime(2026, 2, 21, 7, 0, 41).timestamp()
+
+        JSONOutputWriter.save_snapshot(
+            frame=frame,
+            plate_text="93508B3",
+            timestamp=ts,
+            frame_number=42,
+            source="/data/videos/gate_front.mp4",
+            path_template=template,
+        )
+
+        expected = os.path.join(
+            tmpdir, "2026/02/21/93508B3_070041_f42_gate_front.jpg"
+        )
+        assert Path(expected).exists(), f"Expected snapshot at {expected}"
+        assert Path(expected).stat().st_size > 0
+
+
+def test_snapshot_writes_image():
+    """Test that snapshot writes a valid image file with correct content."""
+    from lpr.output import JSONOutputWriter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        template = os.path.join(tmpdir, "{plate}.jpg")
+
+        # Create a frame with known content (blue image)
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        frame[:, :] = (255, 0, 0)  # blue in BGR
+
+        JSONOutputWriter.save_snapshot(
+            frame=frame,
+            plate_text="TEST123",
+            timestamp=1740150600.123,
+            frame_number=1,
+            source="cam1.mp4",
+            path_template=template,
+        )
+
+        out_path = os.path.join(tmpdir, "TEST123.jpg")
+        assert Path(out_path).exists()
+
+        # Read back and verify it's a valid image
+        img = cv2.imread(out_path)
+        assert img is not None
+        assert img.shape == (100, 200, 3)
+
+        # PNG test
+        template_png = os.path.join(tmpdir, "{plate}.png")
+        JSONOutputWriter.save_snapshot(
+            frame=frame,
+            plate_text="TEST456",
+            timestamp=1740150600.123,
+            frame_number=2,
+            source="cam1.mp4",
+            path_template=template_png,
+        )
+
+        png_path = os.path.join(tmpdir, "TEST456.png")
+        assert Path(png_path).exists()
+        img_png = cv2.imread(png_path)
+        assert img_png is not None
+        assert img_png.shape == (100, 200, 3)
 
 
 def test_output_writer_with_consensus():

@@ -126,6 +126,14 @@ def parse_args(argv: list[str] | None = None) -> Config:
         help="Use legacy YOLO+contour detection instead of dedicated plate detector",
     )
     parser.add_argument(
+        "--snapshot",
+        default=None,
+        metavar="PATH_TEMPLATE",
+        help="Save snapshot image on plate detection (supports "
+        "{plate}, {year}, {month}, {day}, {hour}, {minute}, "
+        "{second}, {timestamp}, {frame}, {source} variables)",
+    )
+    parser.add_argument(
         "--vehicle-attrs",
         action="store_true",
         help="Enable vehicle attribute detection (color, type)",
@@ -159,6 +167,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     return Config(
         source=args.source,
+        snapshot_path=args.snapshot,
         output_path=Path(args.output),
         device=args.device,
         confidence_threshold=args.confidence,

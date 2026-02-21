@@ -36,6 +36,9 @@ class Config:
     detection_model: str = "yolo-v9-t-384-license-plate-end2end"
     use_legacy_detector: bool = False
 
+    # Snapshot
+    snapshot_path: str | None = None
+
     # Vehicle attribute detection
     vehicle_attrs: bool = False
     vehicle_make_model_path: Path | None = None

@@ -176,6 +176,16 @@ class Pipeline:
             )
             writer.write(record)
 
+            if self.config.snapshot_path:
+                writer.save_snapshot(
+                    frame=frame.image,
+                    plate_text=result.text,
+                    timestamp=result.last_seen,
+                    frame_number=result.frame_number,
+                    source=result.source,
+                    path_template=self.config.snapshot_path,
+                )
+
             vehicle_info = ""
             if result.vehicle_color or result.vehicle_type:
                 parts = [

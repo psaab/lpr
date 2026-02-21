@@ -7,6 +7,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 logger = logging.getLogger("lpr.output")
 
 
@@ -75,6 +78,49 @@ class JSONOutputWriter:
 
     def __exit__(self, *_):
         self.close()
+
+    @staticmethod
+    def save_snapshot(
+        frame: np.ndarray,
+        plate_text: str,
+        timestamp: float,
+        frame_number: int,
+        source: str,
+        path_template: str,
+    ) -> None:
+        """Save a snapshot image for a detected plate.
+
+        Expands template variables and writes the frame as an image file.
+        """
+        dt = datetime.fromtimestamp(timestamp)
+        source_stem = Path(source).stem
+
+        path_str = path_template.format(
+            plate=plate_text,
+            year=f"{dt.year:04d}",
+            month=f"{dt.month:02d}",
+            day=f"{dt.day:02d}",
+            hour=f"{dt.hour:02d}",
+            minute=f"{dt.minute:02d}",
+            second=f"{dt.second:02d}",
+            timestamp=f"{timestamp:.3f}",
+            frame=frame_number,
+            source=source_stem,
+        )
+
+        out = Path(path_str)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        ext = out.suffix.lower()
+        if ext == ".png":
+            cv2.imwrite(str(out), frame)
+        elif ext in (".jpg", ".jpeg"):
+            cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        else:
+            # Default to JPEG for unrecognized extensions
+            cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+        logger.info("Snapshot saved: %s", out)
 
     @staticmethod
     def make_record(
