@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import select
 import shutil
 import subprocess
 import time
@@ -111,6 +113,7 @@ class StreamReader:
         max_reconnects: int = 10,
         tls_verify: bool = False,
         tls_ca_file: str | None = None,
+        stall_timeout: float = 30.0,
     ):
         self.source = source
         self.frame_skip = max(1, frame_skip)
@@ -118,6 +121,7 @@ class StreamReader:
         self.max_reconnects = max_reconnects
         self._tls_verify = tls_verify
         self._tls_ca_file = tls_ca_file
+        self._stall_timeout = stall_timeout
         self._is_stream = (
             source.startswith("rtsp://")
             or source.startswith("rtsps://")
@@ -145,9 +149,11 @@ class StreamReader:
 
         # RTSP/RTSPS stream options
         if self._is_stream:
+            timeout_us = str(int(self._stall_timeout * 1_000_000))
             options = {
                 "rtsp_transport": "tcp",
-                "stimeout": "5000000",
+                "stimeout": timeout_us,
+                "rw_timeout": timeout_us,
                 "analyzeduration": "1000000",
             }
             if self.source.startswith("rtsps://"):
@@ -225,6 +231,14 @@ class StreamReader:
             if self._tls_ca_file:
                 tls_args += ["-ca_file", self._tls_ca_file]
 
+        # Network stall timeout
+        net_args: list[str] = []
+        if self._is_stream and self._stall_timeout > 0:
+            timeout_us = str(int(self._stall_timeout * 1_000_000))
+            net_args = ["-rw_timeout", timeout_us]
+            if self.source.startswith(("rtsp://", "rtsps://")):
+                net_args += ["-stimeout", timeout_us]
+
         # Compute downscaled dimensions (even values required for NV12)
         need_scale = src_h > _MAX_OUTPUT_HEIGHT
         if need_scale:
@@ -246,7 +260,7 @@ class StreamReader:
                 vf = f"scale_cuda=w={out_w}:h={out_h},hwdownload,format=nv12,{select_filter}"
                 cmd = [
                     ffmpeg,
-                ] + tls_args + [
+                ] + tls_args + net_args + [
                     "-hwaccel", "cuda",
                     "-hwaccel_output_format", "cuda",
                     "-i", self.source,
@@ -259,7 +273,7 @@ class StreamReader:
             # Strategy 2: CUDA decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
-            ] + tls_args + [
+            ] + tls_args + net_args + [
                 "-hwaccel", "cuda",
                 "-i", self.source,
                 "-vf", select_filter,
@@ -272,7 +286,7 @@ class StreamReader:
             # Strategy 3: VAAPI decode + frame select + NV12 output
             cmd = [
                 ffmpeg,
-            ] + tls_args + [
+            ] + tls_args + net_args + [
                 "-hwaccel", "vaapi",
                 "-i", self.source,
                 "-vf", select_filter,
@@ -391,7 +405,22 @@ class StreamReader:
             if not path.exists():
                 raise FileNotFoundError(f"Video file not found: {self.source}")
 
-        cap = cv2.VideoCapture(self.source)
+        # For network streams, set open/read timeouts if OpenCV supports them
+        if self._is_stream and self._stall_timeout > 0:
+            timeout_ms = int(self._stall_timeout * 1000)
+            open_prop = getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC", None)
+            read_prop = getattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC", None)
+            if open_prop is not None and read_prop is not None:
+                cap = cv2.VideoCapture(
+                    self.source,
+                    cv2.CAP_FFMPEG,
+                    [open_prop, timeout_ms, read_prop, timeout_ms],
+                )
+            else:
+                cap = cv2.VideoCapture(self.source)
+        else:
+            cap = cv2.VideoCapture(self.source)
+
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video source: {self.source}")
 
@@ -442,9 +471,10 @@ class StreamReader:
                     frame_number = 0  # cv2 reached end
                     return
 
-            except RuntimeError:
+            except Exception as e:
                 if not self._is_stream:
                     raise
+                logger.warning("Stream error: %s", e)
             finally:
                 self.close()
 
@@ -461,6 +491,32 @@ class StreamReader:
                 self.reconnect_delay, reconnects, self.max_reconnects,
             )
             time.sleep(self.reconnect_delay)
+
+    def _read_pipe_bytes(self, nbytes: int) -> bytes | None:
+        """Read exactly nbytes from ffmpeg stdout pipe.
+
+        For network streams, uses select() to detect stalls.
+        Returns None on EOF or stall timeout.
+        """
+        if not self._is_stream or self._stall_timeout <= 0:
+            data = self._proc.stdout.read(nbytes)
+            return data if len(data) == nbytes else None
+
+        fd = self._proc.stdout.fileno()
+        buf = bytearray()
+        while len(buf) < nbytes:
+            ready, _, _ = select.select([fd], [], [], self._stall_timeout)
+            if not ready:
+                logger.warning(
+                    "No data from stream for %.0fs, treating as stall",
+                    self._stall_timeout,
+                )
+                return None
+            chunk = os.read(fd, nbytes - len(buf))
+            if not chunk:
+                return None  # EOF
+            buf.extend(chunk)
+        return bytes(buf)
 
     def _frames_pyav(self, start_frame: int) -> Generator[Frame, None, None]:
         """Yield frames from PyAV container (direct BGR numpy output)."""
@@ -507,10 +563,10 @@ class StreamReader:
         nv12_h = h * 3 // 2  # NV12 has 1.5x height
 
         while self._proc is not None:
-            data = self._proc.stdout.read(self._frame_size)
-            if len(data) != self._frame_size:
+            data = self._read_pipe_bytes(self._frame_size)
+            if data is None:
                 if self._is_stream:
-                    logger.warning("Stream read failed, will reconnect")
+                    logger.warning("Stream read failed or stalled, will reconnect")
                 else:
                     logger.info("End of video file reached")
                 return

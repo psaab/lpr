@@ -20,6 +20,7 @@ class Config:
     log_file: Path | None = None
     reconnect_delay: float = 5.0
     max_reconnects: int = 10
+    stall_timeout: float = 30.0
     dedup_seconds: float = 5.0
 
     # Consensus voting

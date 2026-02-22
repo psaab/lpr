@@ -80,6 +80,13 @@ def parse_args(argv: list[str] | None = None) -> Config:
         help="Log file path (default: stderr only)",
     )
     parser.add_argument(
+        "--stall-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds with no data before treating a network stream as "
+        "stalled and reconnecting (default: 30.0)",
+    )
+    parser.add_argument(
         "--dedup-seconds",
         type=float,
         default=5.0,
@@ -177,6 +184,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
         pid_file=Path(args.pid_file),
         log_level=args.log_level,
         log_file=Path(args.log_file) if args.log_file else None,
+        stall_timeout=args.stall_timeout,
         dedup_seconds=args.dedup_seconds,
         tls_verify=args.tls_verify,
         tls_ca_file=Path(args.tls_ca_file) if args.tls_ca_file else None,

@@ -121,6 +121,7 @@ class Pipeline:
             tls_ca_file=(
                 str(self.config.tls_ca_file) if self.config.tls_ca_file else None
             ),
+            stall_timeout=self.config.stall_timeout,
         )
 
         try:

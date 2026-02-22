@@ -409,6 +409,31 @@ def test_config_sources_default():
     assert isinstance(config.sources, list)
 
 
+def test_config_stall_timeout_default():
+    """Test that Config.stall_timeout defaults to 30.0."""
+    from lpr.config import Config
+
+    config = Config()
+    assert config.stall_timeout == 30.0
+
+
+def test_parse_args_stall_timeout():
+    """Test that --stall-timeout is parsed into config."""
+    from lpr.cli import parse_args
+
+    config = parse_args(["video.mp4", "--stall-timeout", "15"])
+    assert config.stall_timeout == 15.0
+
+
+def test_stream_reader_stall_timeout():
+    """Test that StreamReader accepts stall_timeout parameter."""
+    from lpr.stream import StreamReader
+
+    reader = StreamReader("rtsp://example.com/stream", stall_timeout=10.0)
+    assert reader._stall_timeout == 10.0
+    assert reader._is_stream is True
+
+
 def test_output_writer_with_consensus():
     """Test JSON output writer with consensus fields."""
     from lpr.output import JSONOutputWriter
