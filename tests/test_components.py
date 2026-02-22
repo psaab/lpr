@@ -383,6 +383,32 @@ def test_snapshot_writes_image():
         assert img_png.shape == (100, 200, 3)
 
 
+def test_parse_args_multiple_sources():
+    """Test that CLI accepts multiple sources."""
+    from lpr.cli import parse_args
+
+    config = parse_args(["cam1.mp4", "cam2.mp4", "-o", "out.jsonl"])
+    assert config.sources == ["cam1.mp4", "cam2.mp4"]
+    assert config.output_path == Path("out.jsonl")
+
+
+def test_parse_args_single_source():
+    """Test that CLI still works with a single source."""
+    from lpr.cli import parse_args
+
+    config = parse_args(["video.mp4"])
+    assert config.sources == ["video.mp4"]
+
+
+def test_config_sources_default():
+    """Test that Config.sources defaults to empty list."""
+    from lpr.config import Config
+
+    config = Config()
+    assert config.sources == []
+    assert isinstance(config.sources, list)
+
+
 def test_output_writer_with_consensus():
     """Test JSON output writer with consensus fields."""
     from lpr.output import JSONOutputWriter

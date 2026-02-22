@@ -32,7 +32,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
     )
     parser.add_argument(
         "source",
-        help="Video file path or RTSP stream URL",
+        nargs="+",
+        help="Video file path(s) or RTSP stream URL(s)",
     )
     parser.add_argument(
         "-o", "--output",
@@ -166,7 +167,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
         args.vehicle_attrs = True
 
     return Config(
-        source=args.source,
+        sources=args.source,
         snapshot_path=args.snapshot,
         output_path=Path(args.output),
         device=args.device,
@@ -203,7 +204,7 @@ def main(argv: list[str] | None = None) -> None:
 
     logger = logging.getLogger("lpr")
     logger.info("LPR daemon starting")
-    logger.info("Source: %s", config.source)
+    logger.info("Sources: %s", ", ".join(config.sources))
     logger.info("Output: %s", config.output_path)
     logger.info("Device: %s", config.device)
 

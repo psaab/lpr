@@ -9,7 +9,7 @@ from pathlib import Path
 class Config:
     """LPR daemon configuration."""
 
-    source: str = ""
+    sources: list[str] = field(default_factory=list)
     output_path: Path = field(default_factory=lambda: Path("detections.jsonl"))
     device: str = "auto"
     confidence_threshold: float = 0.3
